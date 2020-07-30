@@ -32,22 +32,29 @@ func (m *Sealing) Plan(events []statemachine.Event, user interface{}) (interface
 }
 
 var fsmPlanners = map[SectorState]func(events []statemachine.Event, state *SectorInfo) error{
+	// Sealing
+
 	UndefinedSectorState: planOne(on(SectorStart{}, Packing)),
 	Packing:              planOne(on(SectorPacked{}, PreCommit1)),
 	PreCommit1: planOne(
 		on(SectorPreCommit1{}, PreCommit2),
-		on(SectorSealPreCommitFailed{}, SealFailed),
+		on(SectorSealPreCommit1Failed{}, SealPreCommit1Failed),
 		on(SectorPackingFailed{}, PackingFailed),
 	),
 	PreCommit2: planOne(
 		on(SectorPreCommit2{}, PreCommitting),
-		on(SectorSealPreCommitFailed{}, SealFailed),
+		on(SectorSealPreCommit2Failed{}, SealPreCommit2Failed),
 		on(SectorPackingFailed{}, PackingFailed),
 	),
 	PreCommitting: planOne(
-		on(SectorSealPreCommitFailed{}, SealFailed),
-		on(SectorPreCommitted{}, WaitSeed),
+		on(SectorSealPreCommit1Failed{}, SealPreCommit1Failed),
+		on(SectorPreCommitted{}, PreCommitWait),
 		on(SectorChainPreCommitFailed{}, PreCommitFailed),
+		on(SectorPreCommitLanded{}, WaitSeed),
+	),
+	PreCommitWait: planOne(
+		on(SectorChainPreCommitFailed{}, PreCommitFailed),
+		on(SectorPreCommitLanded{}, WaitSeed),
 	),
 	WaitSeed: planOne(
 		on(SectorSeedReady{}, Committing),
@@ -61,35 +68,56 @@ var fsmPlanners = map[SectorState]func(events []statemachine.Event, state *Secto
 
 	FinalizeSector: planOne(
 		on(SectorFinalized{}, Proving),
+		on(SectorFinalizeFailed{}, FinalizeFailed),
 	),
 
-	Proving: planOne(
-		on(SectorFaultReported{}, FaultReported),
-		on(SectorFaulty{}, Faulty),
-	),
+	// Sealing errors
 
-	SealFailed: planOne(
-		on(SectorRetrySeal{}, PreCommit1),
+	SealPreCommit1Failed: planOne(
+		on(SectorRetrySealPreCommit1{}, PreCommit1),
+	),
+	SealPreCommit2Failed: planOne(
+		on(SectorRetrySealPreCommit1{}, PreCommit1),
+		on(SectorRetrySealPreCommit2{}, PreCommit2),
 	),
 	PreCommitFailed: planOne(
 		on(SectorRetryPreCommit{}, PreCommitting),
 		on(SectorRetryWaitSeed{}, WaitSeed),
-		on(SectorSealPreCommitFailed{}, SealFailed),
+		on(SectorSealPreCommit1Failed{}, SealPreCommit1Failed),
+		on(SectorPreCommitLanded{}, WaitSeed),
 	),
 	ComputeProofFailed: planOne(
 		on(SectorRetryComputeProof{}, Committing),
+		on(SectorSealPreCommit1Failed{}, SealPreCommit1Failed),
 	),
 	CommitFailed: planOne(
-		on(SectorSealPreCommitFailed{}, SealFailed),
+		on(SectorSealPreCommit1Failed{}, SealPreCommit1Failed),
 		on(SectorRetryWaitSeed{}, WaitSeed),
 		on(SectorRetryComputeProof{}, Committing),
 		on(SectorRetryInvalidProof{}, Committing),
+		on(SectorRetryPreCommitWait{}, PreCommitWait),
+	),
+	FinalizeFailed: planOne(
+		on(SectorRetryFinalize{}, FinalizeSector),
 	),
 
+	// Post-seal
+
+	Proving: planOne(
+		on(SectorFaultReported{}, FaultReported),
+		on(SectorFaulty{}, Faulty),
+		on(SectorRemove{}, Removing),
+	),
+	Removing: planOne(
+		on(SectorRemoved{}, Removed),
+		on(SectorRemoveFailed{}, RemoveFailed),
+	),
 	Faulty: planOne(
 		on(SectorFaultReported{}, FaultReported),
 	),
+
 	FaultedFinal: final,
+	Removed:      final,
 }
 
 func (m *Sealing) plan(events []statemachine.Event, state *SectorInfo) (func(statemachine.Context, SectorInfo) error, error) {
@@ -136,10 +164,11 @@ func (m *Sealing) plan(events []statemachine.Event, state *SectorInfo) (func(sta
 		*<- Packing <- incoming
 		|   |
 		|   v
-		*<- PreCommit1 <--> SealFailed
-		|   |                 ^^^
-		|   v                 |||
-		*<- PreCommit2 -------/||
+		*<- PreCommit1 <--> SealPreCommit1Failed
+		|   |       ^          ^^
+		|   |       *----------++----\
+		|   v       v          ||    |
+		*<- PreCommit2 --------++--> SealPreCommit2Failed
 		|   |                  ||
 		|   v          /-------/|
 		*   PreCommitting <-----+---> PreCommitFailed
@@ -156,14 +185,17 @@ func (m *Sealing) plan(events []statemachine.Event, state *SectorInfo) (func(sta
 		*<- CommitWait ---/
 		|   |
 		|   v
+		|   FinalizeSector <--> FinalizeFailed
+		|   |
+		|   v
 		*<- Proving
 		|
 		v
 		FailedUnrecoverable
 
 		UndefinedSectorState <- ¯\_(ツ)_/¯
-		    |                     ^
-		    *---------------------/
+			|                     ^
+			*---------------------/
 
 	*/
 
@@ -177,6 +209,8 @@ func (m *Sealing) plan(events []statemachine.Event, state *SectorInfo) (func(sta
 		return m.handlePreCommit2, nil
 	case PreCommitting:
 		return m.handlePreCommitting, nil
+	case PreCommitWait:
+		return m.handlePreCommitWait, nil
 	case WaitSeed:
 		return m.handleWaitSeed, nil
 	case Committing:
@@ -185,19 +219,27 @@ func (m *Sealing) plan(events []statemachine.Event, state *SectorInfo) (func(sta
 		return m.handleCommitWait, nil
 	case FinalizeSector:
 		return m.handleFinalizeSector, nil
-	case Proving:
-		// TODO: track sector health / expiration
-		log.Infof("Proving sector %d", state.SectorNumber)
 
 	// Handled failure modes
-	case SealFailed:
-		return m.handleSealFailed, nil
+	case SealPreCommit1Failed:
+		return m.handleSealPrecommit1Failed, nil
+	case SealPreCommit2Failed:
+		return m.handleSealPrecommit2Failed, nil
 	case PreCommitFailed:
 		return m.handlePreCommitFailed, nil
 	case ComputeProofFailed:
 		return m.handleComputeProofFailed, nil
 	case CommitFailed:
 		return m.handleCommitFailed, nil
+	case FinalizeFailed:
+		return m.handleFinalizeFailed, nil
+
+	// Post-seal
+	case Proving:
+		// TODO: track sector health / expiration
+		log.Infof("Proving sector %d", state.SectorNumber)
+	case Removing:
+		return m.handleRemoving, nil
 
 		// Faults
 	case Faulty:
@@ -211,7 +253,7 @@ func (m *Sealing) plan(events []statemachine.Event, state *SectorInfo) (func(sta
 	case FailedUnrecoverable:
 		log.Errorf("sector %d failed unrecoverably", state.SectorNumber)
 	default:
-		log.Errorf("unexpected sector update state: %d", state.State)
+		log.Errorf("unexpected sector update state: %s", state.State)
 	}
 
 	return nil, nil
@@ -238,8 +280,8 @@ func planCommitting(events []statemachine.Event, state *SectorInfo) error {
 			return nil
 		case SectorComputeProofFailed:
 			state.State = ComputeProofFailed
-		case SectorSealPreCommitFailed:
-			state.State = CommitFailed
+		case SectorSealPreCommit1Failed:
+			state.State = SealPreCommit1Failed
 		case SectorCommitFailed:
 			state.State = CommitFailed
 		default:

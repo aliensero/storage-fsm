@@ -24,9 +24,12 @@ type ErrExpiredDeals struct{ error }
 
 type ErrBadCommD struct{ error }
 type ErrExpiredTicket struct{ error }
+type ErrBadTicket struct{ error }
+type ErrPrecommitOnChain struct{ error }
 
 type ErrBadSeed struct{ error }
 type ErrInvalidProof struct{ error }
+type ErrNoPrecommit struct{ error }
 
 func checkPieces(ctx context.Context, si SectorInfo, api SealingAPI) error {
 	tok, height, err := api.ChainHead(ctx)
@@ -78,8 +81,20 @@ func checkPrecommit(ctx context.Context, maddr address.Address, si SectorInfo, t
 		return &ErrBadCommD{xerrors.Errorf("on chain CommD differs from sector: %s != %s", commD, si.CommD)}
 	}
 
-	if int64(height)-int64(si.TicketEpoch+SealRandomnessLookback) > SealRandomnessLookbackLimit {
+	if height-(si.TicketEpoch+SealRandomnessLookback) > SealRandomnessLookbackLimit(si.SectorType) {
 		return &ErrExpiredTicket{xerrors.Errorf("ticket expired: seal height: %d, head: %d", si.TicketEpoch+SealRandomnessLookback, height)}
+	}
+
+	pci, err := api.StateSectorPreCommitInfo(ctx, maddr, si.SectorNumber, tok)
+	if err != nil {
+		return &ErrApi{xerrors.Errorf("getting precommit info: %w", err)}
+	}
+
+	if pci != nil {
+		if pci.Info.SealRandEpoch != si.TicketEpoch {
+			return &ErrBadTicket{}
+		}
+		return &ErrPrecommitOnChain{}
 	}
 
 	return nil
@@ -93,6 +108,10 @@ func (m *Sealing) checkCommit(ctx context.Context, si SectorInfo, proof []byte, 
 	pci, err := m.api.StateSectorPreCommitInfo(ctx, m.maddr, si.SectorNumber, tok)
 	if err != nil {
 		return xerrors.Errorf("getting precommit info: %w", err)
+	}
+
+	if pci == nil {
+		return &ErrNoPrecommit{xerrors.Errorf("precommit info not found on-chain")}
 	}
 
 	if pci.PreCommitEpoch+miner.PreCommitChallengeDelay != si.SeedEpoch {
@@ -129,7 +148,7 @@ func (m *Sealing) checkCommit(ctx context.Context, si SectorInfo, proof []byte, 
 	ok, err := m.verif.VerifySeal(abi.SealVerifyInfo{
 		SectorID:              m.minerSector(si.SectorNumber),
 		SealedCID:             pci.Info.SealedCID,
-		RegisteredProof:       spt,
+		SealProof:             spt,
 		Proof:                 proof,
 		Randomness:            si.TicketValue,
 		InteractiveRandomness: si.SeedValue,

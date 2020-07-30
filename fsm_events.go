@@ -49,7 +49,7 @@ func (evt SectorForceState) applyGlobal(state *SectorInfo) bool {
 
 type SectorStart struct {
 	ID         abi.SectorNumber
-	SectorType abi.RegisteredProof
+	SectorType abi.RegisteredSealProof
 	Pieces     []Piece
 }
 
@@ -84,6 +84,7 @@ func (evt SectorPreCommit1) apply(state *SectorInfo) {
 	state.PreCommit1Out = evt.PreCommit1Out
 	state.TicketEpoch = evt.TicketEpoch
 	state.TicketValue = evt.TicketValue
+	state.PreCommit2Fails = 0
 }
 
 type SectorPreCommit2 struct {
@@ -98,11 +99,28 @@ func (evt SectorPreCommit2) apply(state *SectorInfo) {
 	state.CommR = &commr
 }
 
-type SectorSealPreCommitFailed struct{ error }
+type SectorPreCommitLanded struct {
+	TipSet TipSetToken
+}
 
-func (evt SectorSealPreCommitFailed) FormatError(xerrors.Printer) (next error) { return evt.error }
-func (evt SectorSealPreCommitFailed) apply(si *SectorInfo) {
+func (evt SectorPreCommitLanded) apply(si *SectorInfo) {
+	si.PreCommitTipSet = evt.TipSet
+}
+
+type SectorSealPreCommit1Failed struct{ error }
+
+func (evt SectorSealPreCommit1Failed) FormatError(xerrors.Printer) (next error) { return evt.error }
+func (evt SectorSealPreCommit1Failed) apply(si *SectorInfo) {
 	si.InvalidProofs = 0 // reset counter
+	si.PreCommit2Fails = 0
+}
+
+type SectorSealPreCommit2Failed struct{ error }
+
+func (evt SectorSealPreCommit2Failed) FormatError(xerrors.Printer) (next error) { return evt.error }
+func (evt SectorSealPreCommit2Failed) apply(si *SectorInfo) {
+	si.InvalidProofs = 0 // reset counter
+	si.PreCommit2Fails++
 }
 
 type SectorChainPreCommitFailed struct{ error }
@@ -156,6 +174,10 @@ type SectorFinalized struct{}
 
 func (evt SectorFinalized) apply(*SectorInfo) {}
 
+type SectorRetryFinalize struct{}
+
+func (evt SectorRetryFinalize) apply(*SectorInfo) {}
+
 type SectorFinalizeFailed struct{ error }
 
 func (evt SectorFinalizeFailed) FormatError(xerrors.Printer) (next error) { return evt.error }
@@ -163,9 +185,13 @@ func (evt SectorFinalizeFailed) apply(*SectorInfo)                        {}
 
 // Failed state recovery
 
-type SectorRetrySeal struct{}
+type SectorRetrySealPreCommit1 struct{}
 
-func (evt SectorRetrySeal) apply(state *SectorInfo) {}
+func (evt SectorRetrySealPreCommit1) apply(state *SectorInfo) {}
+
+type SectorRetrySealPreCommit2 struct{}
+
+func (evt SectorRetrySealPreCommit2) apply(state *SectorInfo) {}
 
 type SectorRetryPreCommit struct{}
 
@@ -175,9 +201,15 @@ type SectorRetryWaitSeed struct{}
 
 func (evt SectorRetryWaitSeed) apply(state *SectorInfo) {}
 
+type SectorRetryPreCommitWait struct{}
+
+func (evt SectorRetryPreCommitWait) apply(state *SectorInfo) {}
+
 type SectorRetryComputeProof struct{}
 
-func (evt SectorRetryComputeProof) apply(state *SectorInfo) {}
+func (evt SectorRetryComputeProof) apply(state *SectorInfo) {
+	state.InvalidProofs++
+}
 
 type SectorRetryInvalidProof struct{}
 
@@ -198,3 +230,18 @@ func (evt SectorFaultReported) apply(state *SectorInfo) {
 }
 
 type SectorFaultedFinal struct{}
+
+// External events
+
+type SectorRemove struct{}
+
+func (evt SectorRemove) apply(state *SectorInfo) {}
+
+type SectorRemoved struct{}
+
+func (evt SectorRemoved) apply(state *SectorInfo) {}
+
+type SectorRemoveFailed struct{ error }
+
+func (evt SectorRemoveFailed) FormatError(xerrors.Printer) (next error) { return evt.error }
+func (evt SectorRemoveFailed) apply(*SectorInfo)                        {}

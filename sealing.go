@@ -28,8 +28,9 @@ var log = logging.Logger("sectors")
 
 type SealingAPI interface {
 	StateWaitMsg(context.Context, cid.Cid) (MsgLookup, error)
-	StateComputeDataCommitment(ctx context.Context, maddr address.Address, sectorType abi.RegisteredProof, deals []abi.DealID, tok TipSetToken) (cid.Cid, error)
+	StateComputeDataCommitment(ctx context.Context, maddr address.Address, sectorType abi.RegisteredSealProof, deals []abi.DealID, tok TipSetToken) (cid.Cid, error)
 	StateSectorPreCommitInfo(ctx context.Context, maddr address.Address, sectorNumber abi.SectorNumber, tok TipSetToken) (*miner.SectorPreCommitOnChainInfo, error)
+	StateSectorGetInfo(ctx context.Context, maddr address.Address, sectorNumber abi.SectorNumber, tok TipSetToken) (*miner.SectorOnChainInfo, error)
 	StateMinerSectorSize(context.Context, address.Address, TipSetToken) (abi.SectorSize, error)
 	StateMinerWorkerAddress(ctx context.Context, maddr address.Address, tok TipSetToken) (address.Address, error)
 	StateMinerDeadlines(ctx context.Context, maddr address.Address, tok TipSetToken) (*miner.Deadlines, error)
@@ -107,7 +108,7 @@ func (m *Sealing) AllocatePiece(size abi.UnpaddedPieceSize) (sectorID abi.Sector
 func (m *Sealing) SealPiece(ctx context.Context, size abi.UnpaddedPieceSize, r io.Reader, sectorID abi.SectorNumber, d DealInfo) error {
 	log.Infof("Seal piece for deal %d", d.DealID)
 
-	ppi, err := m.sealer.AddPiece(ctx, m.minerSector(sectorID), []abi.UnpaddedPieceSize{}, size, r)
+	ppi, err := m.sealer.AddPiece(sectorstorage.WithPriority(ctx, DealSectorPriority), m.minerSector(sectorID), []abi.UnpaddedPieceSize{}, size, r)
 	if err != nil {
 		return xerrors.Errorf("adding piece to sector: %w", err)
 	}
@@ -128,13 +129,17 @@ func (m *Sealing) SealPiece(ctx context.Context, size abi.UnpaddedPieceSize, r i
 // newSector accepts a slice of pieces which will have a deal associated with
 // them (in the event of a storage deal) or no deal (in the event of sealing
 // garbage data)
-func (m *Sealing) newSector(sid abi.SectorNumber, rt abi.RegisteredProof, pieces []Piece) error {
+func (m *Sealing) newSector(sid abi.SectorNumber, rt abi.RegisteredSealProof, pieces []Piece) error {
 	log.Infof("Start sealing %d", sid)
 	return m.sectors.Send(uint64(sid), SectorStart{
 		ID:         sid,
 		Pieces:     pieces,
 		SectorType: rt,
 	})
+}
+
+func (m *Sealing) Remove(ctx context.Context, sid abi.SectorNumber) error {
+	return m.sectors.Send(uint64(sid), SectorRemove{})
 }
 
 func (m *Sealing) minerSector(num abi.SectorNumber) abi.SectorID {

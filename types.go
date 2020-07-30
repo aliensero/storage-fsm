@@ -2,9 +2,11 @@ package sealing
 
 import (
 	"bytes"
+	"context"
 
 	"github.com/ipfs/go-cid"
 
+	sectorstorage "github.com/filecoin-project/sector-storage"
 	"github.com/filecoin-project/specs-actors/actors/abi"
 	"github.com/filecoin-project/specs-actors/actors/runtime/exitcode"
 	"github.com/filecoin-project/specs-storage/storage"
@@ -48,10 +50,9 @@ type Log struct {
 
 type SectorInfo struct {
 	State        SectorState
-	SectorNumber abi.SectorNumber // TODO: this field's name should be changed to SectorNumber
-	Nonce        uint64           // TODO: remove
+	SectorNumber abi.SectorNumber
 
-	SectorType abi.RegisteredProof
+	SectorType abi.RegisteredSealProof
 
 	// Packing
 	Pieces []Piece
@@ -67,6 +68,9 @@ type SectorInfo struct {
 	Proof []byte
 
 	PreCommitMessage *cid.Cid
+	PreCommitTipSet  TipSetToken
+
+	PreCommit2Fails uint64
 
 	// WaitSeed
 	SeedValue abi.InteractiveSealRandomness
@@ -74,7 +78,7 @@ type SectorInfo struct {
 
 	// Committing
 	CommitMessage *cid.Cid
-	InvalidProofs uint64 // failed proof computations (doesn't validate with proof inputs)
+	InvalidProofs uint64 // failed proof computations (doesn't validate with proof inputs; can't compute)
 
 	// Faults
 	FaultReportMsg *cid.Cid
@@ -110,6 +114,27 @@ func (t *SectorInfo) existingPieceSizes() []abi.UnpaddedPieceSize {
 		out[i] = p.Piece.Size.Unpadded()
 	}
 	return out
+}
+
+func (t *SectorInfo) hasDeals() bool {
+	for _, piece := range t.Pieces {
+		if piece.DealInfo != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (t *SectorInfo) sealingCtx(ctx context.Context) context.Context {
+	// TODO: can also take start epoch into account to give priority to sectors
+	//  we need sealed sooner
+
+	if t.hasDeals() {
+		return sectorstorage.WithPriority(ctx, DealSectorPriority)
+	}
+
+	return ctx
 }
 
 type SectorIDCounter interface {
