@@ -327,6 +327,10 @@ func (m *Sealing) ForceSectorState(ctx context.Context, id abi.SectorNumber, sta
 	return m.sectors.Send(id, SectorForceState{state})
 }
 
+func (m *Sealing) DelSectorMachineById(id interface{}) (int, error) {
+	return m.sectors.Delsta(id)
+}
+
 func final(events []statemachine.Event, state *SectorInfo) error {
 	return xerrors.Errorf("didn't expect any events in state %s, got %+v", state.State, events)
 }
