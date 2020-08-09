@@ -50,6 +50,10 @@ func (m *Sealing) ListSectors() ([]SectorInfo, error) {
 	return sectors, nil
 }
 
+func (m *Sealing) DelSectorById(id interface{}) error {
+	return m.sectors.Delete(id)
+}
+
 func (m *Sealing) GetSectorInfo(sid abi.SectorNumber) (SectorInfo, error) {
 	var out SectorInfo
 	err := m.sectors.Get(uint64(sid)).Get(&out)
